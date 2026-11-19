@@ -22,4 +22,4 @@ esac
 echo "mengunduh $url"
 curl -fsSL "$url" | tar -xz -C "$tmp" --strip-components=1
 MDV_NO_HINT=1 sh "$tmp/${1:-install}.sh"
-[ "${1:-install}" = uninstall ] || echo "hapus dengan: curl -fsSL $repo/raw/main/install-online.sh | sh -s -- uninstall"
+[ "${1:-install}" = uninstall ] || echo "hapus dengan: curl -fsSL $repo/raw/$ref/install-online.sh | sh -s -- uninstall"
