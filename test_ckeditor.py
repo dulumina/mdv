@@ -15,7 +15,7 @@ spec.loader.exec_module(m)
 SRC = sys.argv[1] if len(sys.argv) > 1 else str(HERE / "README.md")
 app = m.App(SRC)
 Gtk = app.Gtk
-app.set_view_mode("wysiwyg")
+app.set_view_mode("editor")
 app.show()
 
 
@@ -29,7 +29,7 @@ def pump(sec):
 
 def js(script, wait=2.0):
     box = {}
-    app.ckview.run_javascript(
+    app.editor.run_javascript(
         script, None,
         lambda v, res, data=None: box.update(v=v.run_javascript_finish(res).get_js_value().to_string()),
         None,
@@ -45,6 +45,11 @@ for _ in range(25):
         break
 assert ok == "yes", "CKEditor tidak muncul di DOM"
 print("CKEditor tampil:", ok)
+
+# editor harus benar-benar bisa disunting, bukan read-only (lisensi/Cloud)
+ce = js("document.querySelector('.ck-editor__editable')?.getAttribute('contenteditable')", 0.6)
+assert ce == "true", "CKEditor read-only, contenteditable=%r" % ce
+assert js("document.querySelector('.ck-editor__editable').classList.contains('ck-read-only') ? 'ro' : 'rw'", 0.4) == "rw"
 
 # isi file masuk ke CKEditor (setData CKEditor asinkron, jadi tunggu sampai terisi)
 in_editor = ""

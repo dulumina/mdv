@@ -19,6 +19,10 @@
     'insertTable', 'blockQuote', 'codeBlock', 'horizontalLine',
     '|', 'removeFormat', 'sourceEditing', '|', 'undo', 'redo'];
 
+  // Build UMD dari paket npm `ckeditor5` adalah distribusi Cloud, yang menolak
+  // licenseKey 'GPL' dan membuat editor read-only. Aplikasi ini self-hosted.
+  window[Symbol.for('cke distribution')] = 'sh';
+
   let editor = null;
   let pending = '';
   let userTouched = false;   // interaksi manusia = perubahan boleh dikirim ke Python
