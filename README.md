@@ -74,8 +74,12 @@ Tanpa clone (butuh `curl` + `tar`):
 curl -fsSL https://raw.githubusercontent.com/dulumina/mdv/main/install-online.sh | sh
 ```
 
-Varian itu mengunduh arsip repo, menjalankan `install.sh` di dalamnya, lalu menghapus
-arsip sementara. Pilih versi lain dengan `MDV_REF`:
+Cara kerjanya (`install-online.sh`): unduh arsip repo
+(`archive/refs/heads/main.tar.gz`), ekstrak ke direktori sementara, jalankan
+`install.sh` dari arsip itu — jadi CSS dan `assets/ckeditor/` ikut lengkap — lalu
+direktori sementara dihapus. Tanpa `sudo`, tanpa menyentuh berkas sistem.
+
+Pilih versi lain dengan `MDV_REF` (tag diawali `v`, selain itu dianggap branch):
 
 ```sh
 MDV_REF=v1.0.0 curl -fsSL https://raw.githubusercontent.com/dulumina/mdv/main/install-online.sh | sh
@@ -103,12 +107,23 @@ terpasang, mode editor hanya menampilkan pesan.
 
 ### Hapus
 
+Dari checkout repo:
+
 ```sh
 ./uninstall.sh
 ```
 
-Menghapus `~/.local/bin/mdv`, `~/.local/share/mdv/`, dan entri desktop. File `.md`
-milikmu tidak disentuh.
+Setara tanpa clone:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/dulumina/mdv/main/install-online.sh | sh -s -- uninstall
+```
+
+Keduanya menghapus `~/.local/bin/mdv`, `~/.local/share/mdv/`, dan entri desktop.
+File `.md` milikmu tidak disentuh. Perintah ini aman dijalankan berulang.
+
+Catatan: `raw.githubusercontent.com` bisa menyajikan salinan lama beberapa menit
+setelah push; kalau skrip yang terunduh terasa usang, tambahkan `?x=1` pada URL.
 
 Dependensi (Arch):
 
