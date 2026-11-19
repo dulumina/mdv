@@ -82,6 +82,19 @@ cd mdv
 | `~/.local/share/mdv/assets/` | CSS GitHub + `ckeditor/` |
 | `~/.local/share/applications/mdv.desktop` | entri menu "Open With" (Exec absolut) |
 
+`install.sh` menolak jalan kalau dijalankan di luar checkout repo (aset CSS / skrip
+tidak ada), dan memberi peringatan kalau `assets/ckeditor/` tidak ada — aplikasi tetap
+terpasang, mode editor hanya menampilkan pesan.
+
+### Hapus
+
+```sh
+./uninstall.sh
+```
+
+Menghapus `~/.local/bin/mdv`, `~/.local/share/mdv/`, dan entri desktop. File `.md`
+milikmu tidak disentuh.
+
 Dependensi (Arch):
 
 ```sh
