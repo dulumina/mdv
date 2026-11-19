@@ -68,6 +68,21 @@ ikut terbarui. Saat `mdv` dijalankan langsung dari checkout repo, aplikasi memak
 
 ## Pasang
 
+Tanpa clone (butuh `curl` + `tar`):
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/dulumina/mdv/main/install-online.sh | sh
+```
+
+Varian itu mengunduh arsip repo, menjalankan `install.sh` di dalamnya, lalu menghapus
+arsip sementara. Pilih versi lain dengan `MDV_REF`:
+
+```sh
+MDV_REF=v1.0.0 curl -fsSL https://raw.githubusercontent.com/dulumina/mdv/main/install-online.sh | sh
+```
+
+Atau dari checkout repo:
+
 ```sh
 git clone git@github.com:dulumina/mdv.git
 cd mdv
