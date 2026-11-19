@@ -80,23 +80,16 @@ assert app.dark is (not before), "toggle tema tidak mengubah state"
 app.dirty = False
 assert app.confirm_discard() is True
 
-# formater: bungkus seleksi + prefix baris
-app.buffer.set_text("abc")
-app.buffer.select_range(app.buffer.get_iter_at_offset(0), app.buffer.get_iter_at_offset(3))
-app.apply_format(("**", "**", "tebal"))
-assert app.buffer.get_text(*app.buffer.get_bounds()) == "**abc**"
-app.buffer.set_text("satu\ndua")
-app.buffer.select_range(app.buffer.get_iter_at_offset(0), app.buffer.get_iter_at_offset(8))
-app.apply_format(None, "- ")
-assert app.buffer.get_text(*app.buffer.get_bounds()) == "- satu\n- dua", app.buffer.get_text(*app.buffer.get_bounds())
-assert len(app.toolbar.get_children()) >= 8, "toolbar formater kosong"
+# mode tampilan: default pratinjau saja
+assert app.mode == "preview", app.mode
+app.show()
+assert app.view.get_visible() is True and app.editor.get_visible() is False
+assert app.mode_items["preview"].get_active() is True
 
-# mode tampilan
 for mode, editor_shown, preview_shown in (("preview", False, True), ("editor", True, False), ("both", True, True)):
     app.set_view_mode(mode)
-    assert app.scroller.get_visible() is editor_shown, mode
+    assert app.editor.get_visible() is editor_shown, mode
     assert app.view.get_visible() is preview_shown, mode
-    assert app.toolbar.get_visible() is editor_shown, mode
 
 # tema berlaku ke chrome GTK, bukan cuma pratinjau
 settings = Gtk.Settings.get_default()

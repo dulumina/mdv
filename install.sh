@@ -10,6 +10,10 @@ app_dir="$HOME/.local/share/applications"
 mkdir -p "$bin_dir" "$data_dir/assets" "$app_dir"
 install -m 755 "$here/mdv" "$bin_dir/mdv"
 install -m 644 "$here"/assets/*.css "$data_dir/assets/"
+if [ -d "$here/assets/ckeditor" ]; then
+  rm -rf "$data_dir/assets/ckeditor"
+  cp -r "$here/assets/ckeditor" "$data_dir/assets/ckeditor"
+fi
 sed "s|@BIN@|$bin_dir/mdv|" "$here/mdv.desktop" > "$app_dir/mdv.desktop"
 update-desktop-database "$app_dir" 2>/dev/null || true
 

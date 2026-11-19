@@ -6,6 +6,7 @@ Pakai: mdv [FILE.md]                    buka window (kosong kalau tanpa argumen)
        mdv --dump [FILE.md]            cetak HTML ke stdout
        mdv --export html|pdf OUT FILE.md   ekspor tanpa membuka editor
 """
+import json
 import re
 import subprocess
 import sys
@@ -18,13 +19,19 @@ from pygments.lexers import get_lexer_by_name
 from pygments.util import ClassNotFound
 
 ASSETS = Path.home() / ".local/share/mdv/assets"
+
+
+def assets_dir():
+    """Assets dari repo saat dijalankan dari sumber, selain itu hasil install.sh."""
+    local = Path(__file__).resolve().parent / "assets"
+    return local if (local / "ckeditor" / "editor.html").is_file() else ASSETS
 MD_GLOB = ("*.md", "*.markdown", "*.mdown", "*.mkd")
 
 PAGE = """<!doctype html>
 <html><head><meta charset="utf-8">
 {css}
 <style>
-  html, body {{ margin: 0; }}
+  html, body {{ margin: 0; background: {bg}; }}
   .markdown-body {{ box-sizing: border-box; min-height: 100vh; max-width: 980px; margin: 0 auto; padding: 32px 45px 64px; }}
 </style></head>
 <body><article class="markdown-body">{body}</article></body></html>
@@ -74,12 +81,13 @@ def render_body(text, dark):
 
 def page(text, dark, inline_css=False):
     name = "github-markdown-dark.css" if dark else "github-markdown-light.css"
-    css = ASSETS / name
+    css = assets_dir() / name
     if inline_css:  # ekspor HTML: satu file mandiri
         link = "<style>\n%s\n</style>" % css.read_text(encoding="utf-8")
     else:
         link = '<link rel="stylesheet" href="file://%s">' % css
-    return PAGE.format(css=link, body=render_body(text, dark))
+    bg = "#0d1117" if dark else "#ffffff"
+    return PAGE.format(css=link, bg=bg, body=render_body(text, dark))
 
 
 def read_source(target):
@@ -112,7 +120,7 @@ class App:
         self._loading = False     # sedang set buffer, jangan tandai dirty
         self._pdf_target = None   # cetak ke PDF setelah halaman selesai dimuat
         self._syncing = False     # cegah rekursi saat menyetel state dari kode
-        self.mode = "both"        # both | editor | preview
+        self.mode = "preview"     # preview | editor | both
 
         self.win = Gtk.Window()
         self.win.set_default_size(1280, 900)
@@ -125,8 +133,10 @@ class App:
             Gdk.Screen.get_default(), self.ui_css, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION
         )
 
-        self.scroller, self.editor, self.buffer = self.make_editor()
+        self.buffer = Gtk.TextBuffer()
         self.buffer.connect("changed", self.on_changed)
+        self._editor_ready = False        # halaman CKEditor selesai dimuat
+        self.editor = self.make_editor()  # panel kiri: WebView + CKEditor
 
         self.view = WebKit2.WebView()
         self.view.get_settings().set_enable_javascript(False)
@@ -135,13 +145,11 @@ class App:
 
         self.paned = Gtk.Paned(orientation=Gtk.Orientation.HORIZONTAL)
         self.paned.set_position(500)
-        self.paned.pack1(self.scroller, True, False)
+        self.paned.pack1(self.editor, True, False)
         self.paned.pack2(self.view, True, False)
 
         self.box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
         self.box.pack_start(self.build_menu(), False, False, 0)
-        self.toolbar = self.build_toolbar()
-        self.box.pack_start(self.toolbar, False, False, 0)
         self.box.pack_start(self.paned, True, True, 0)
         self.win.add(self.box)
 
@@ -210,9 +218,9 @@ class App:
         self.mode_items = {}
         group = None
         for label, key, mode in (
-            ("Editor saja", Gdk.KEY_1, "editor"),
-            ("Pratinjau saja", Gdk.KEY_2, "preview"),
-            ("Keduanya", Gdk.KEY_3, "both"),
+            ("Pratinjau saja", Gdk.KEY_1, "preview"),
+            ("Editor", Gdk.KEY_2, "editor"),
+            ("Editor + pratinjau", Gdk.KEY_3, "both"),
         ):
             radio = Gtk.RadioMenuItem(label=label, group=group)
             group = group or radio
@@ -225,92 +233,52 @@ class App:
 
         return bar
 
-    # ---------- editor ----------
+    # ---------- editor (CKEditor 5, sumber isi tetap buffer Markdown) ----------
     def make_editor(self):
-        Gtk = self.Gtk
-        scroller = Gtk.ScrolledWindow()
-        scroller.set_policy(Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.AUTOMATIC)
-        self.GtkSource = None
+        WebKit2 = self.WebKit2
+        path = assets_dir() / "ckeditor" / "editor.html"
+        if not path.is_file():
+            label = self.Gtk.Label(label="CKEditor tidak terpasang.\nJalankan install.sh.")
+            label.set_vexpand(True)
+            return label
+        manager = WebKit2.UserContentManager()
+        manager.register_script_message_handler("mdv")
+        manager.connect("script-message-received::mdv", self.on_editor_message)
+        view = WebKit2.WebView.new_with_user_content_manager(manager)
+        view.get_settings().set_enable_javascript(True)
+        view.connect("decide-policy", self.on_navigate)
+        view.load_uri(path.as_uri() + ("#dark" if self.dark else ""))
+        return view
+
+    def js(self, script):
+        if self._editor_ready:
+            self.editor.run_javascript(script, None, None, None)
+
+    def push_to_editor(self):
+        if not self._editor_ready:
+            return
+        text = self.buffer.get_text(*self.buffer.get_bounds())
+        self.js("window.mdv.setMarkdown(%s)" % json.dumps(text))
+
+    def on_editor_message(self, _manager, result):
         try:
-            import gi
-            gi.require_version("GtkSource", "4")
-            from gi.repository import GtkSource
-
-            self.GtkSource = GtkSource
-            buffer = GtkSource.Buffer()
-            buffer.set_language(GtkSource.LanguageManager.get_default().get_language("markdown"))
-            buffer.set_highlight_syntax(True)
-            view = GtkSource.View(buffer=buffer)
-            view.set_highlight_current_line(True)
-        except (ImportError, ValueError):
-            buffer = Gtk.TextBuffer()
-            view = Gtk.TextView(buffer=buffer)
-            view.set_monospace(True)
-        view.set_wrap_mode(Gtk.WrapMode.WORD_CHAR)
-        view.set_left_margin(8)
-        view.set_right_margin(8)
-        scroller.add(view)
-        return scroller, view, buffer
-
-    def build_toolbar(self):
-        Gtk = self.Gtk
-        bar = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
-        bar.set_border_width(4)
-        accel = self.accel
-        specs = (
-            ("B", "Tebal — Ctrl+B", ("**", "**", "tebal"), None, "b"),
-            ("I", "Miring — Ctrl+I", ("*", "*", "miring"), None, "i"),
-            ("S", "Coret", ("~~", "~~", "coret"), None, None),
-            ("H2", "Judul", None, "## ", None),
-            ("•", "Daftar", None, "- ", None),
-            ("☑", "Task list", None, "- [ ] ", None),
-            (">", "Kutipan", None, "> ", None),
-            ("</>", "Blok kode", ("```\n", "\n```", "kode"), None, None),
-            ("🔗", "Tautan", ("[", "](url)", "teks"), None, None),
-        )
-        for label, tip, wrap, prefix, key in specs:
-            btn = Gtk.Button(label=label)
-            btn.set_tooltip_text(tip)
-            btn.connect("clicked", lambda *_, w=wrap, p=prefix: self.apply_format(w, p))
-            if key:
-                btn.add_accelerator(
-                    "clicked", accel, self.Gdk.KEY_b if key == "b" else self.Gdk.KEY_i,
-                    self.Gdk.ModifierType.CONTROL_MASK, Gtk.AccelFlags.VISIBLE,
-                )
-            bar.pack_start(btn, False, False, 0)
-        return bar
-
-    def apply_format(self, wrap=None, prefix=None):
-        buf = self.buffer
-        if buf.get_has_selection():
-            start, end = buf.get_selection_bounds()
-            s_off, e_off = start.get_offset(), end.get_offset()
-        else:
-            s_off = e_off = buf.get_iter_at_mark(buf.get_insert()).get_offset()
-
-        buf.begin_user_action()
-        if prefix is not None:
-            first = buf.get_iter_at_offset(s_off).get_line()
-            last = buf.get_iter_at_offset(e_off).get_line()
-            for line in range(last, first - 1, -1):  # mundur: offset baris lain tidak bergeser
-                buf.insert(buf.get_iter_at_line(line), prefix)
-            new_s = s_off + len(prefix)
-            new_e = e_off + len(prefix) * (last - first + 1)
-        else:
-            pre, suf, placeholder = wrap
-            if s_off == e_off:
-                buf.insert(buf.get_iter_at_offset(s_off), pre + placeholder + suf)
-                new_s = s_off + len(pre)
-                new_e = new_s + len(placeholder)
-            else:
-                text = buf.get_text(buf.get_iter_at_offset(s_off), buf.get_iter_at_offset(e_off), False)
-                buf.delete(buf.get_iter_at_offset(s_off), buf.get_iter_at_offset(e_off))
-                buf.insert(buf.get_iter_at_offset(s_off), pre + text + suf)
-                new_s = s_off + len(pre)
-                new_e = new_s + len(text)
-        buf.end_user_action()
-        buf.select_range(buf.get_iter_at_offset(new_s), buf.get_iter_at_offset(new_e))
-        self.editor.grab_focus()
+            msg = json.loads(result.get_js_value().to_string())
+        except (ValueError, AttributeError):
+            return
+        if msg.get("ready"):
+            self._editor_ready = True
+            self.js("window.mdv.setDark(%s)" % json.dumps(self.dark))
+            self.push_to_editor()
+            return
+        markdown = msg.get("md")
+        if markdown is None or markdown == self.buffer.get_text(*self.buffer.get_bounds()):
+            return
+        self._loading = True          # jangan balik mendorong ke CKEditor
+        self.buffer.set_text(markdown)
+        self._loading = False
+        self.dirty = True
+        self.set_title()
+        self.refresh()
 
     # ---------- tema ----------
     def theme_exists(self, name):
@@ -328,13 +296,6 @@ class App:
         if wanted != self._current_theme and self.theme_exists(wanted):
             settings.set_property("gtk-theme-name", wanted)
             self._current_theme = wanted
-
-        if self.GtkSource is not None:
-            scheme = self.GtkSource.StyleSchemeManager.get_default().get_scheme(
-                "oblivion" if self.dark else "tango"
-            )
-            if scheme:
-                self.buffer.set_style_scheme(scheme)
 
         bg, fg, muted = (
             ("#0d1117", "#f0f6fc", "#30363d") if self.dark else ("#ffffff", "#1f2328", "#d1d9e0")
@@ -354,6 +315,7 @@ class App:
     def set_dark(self, dark, refresh=True):
         self.dark = bool(dark)
         self.apply_ui_theme()
+        self.js("window.mdv.setDark(%s)" % json.dumps(self.dark))
         if not self._syncing and self.theme_item.get_active() != self.dark:
             self._syncing = True
             self.theme_item.set_active(self.dark)
@@ -363,9 +325,7 @@ class App:
 
     def set_view_mode(self, mode):
         self.mode = mode
-        show_editor = mode in ("both", "editor")
-        self.scroller.set_visible(show_editor)
-        self.toolbar.set_visible(show_editor)
+        self.editor.set_visible(mode in ("both", "editor"))
         self.view.set_visible(mode in ("both", "preview"))
         self._syncing = True
         for name, radio in self.mode_items.items():
@@ -387,6 +347,7 @@ class App:
         self.dirty = False
         self.set_title()
         self.refresh()
+        self.push_to_editor()
 
     def refresh(self, dark=None):
         self._pending = None
@@ -584,8 +545,12 @@ class App:
         if self.Gtk.main_level() > 0:  # dari Ctrl+C loop-nya sudah bubar
             self.Gtk.main_quit()
 
-    def run(self):
+    def show(self):
         self.win.show_all()
+        self.set_view_mode(self.mode)  # show_all menampilkan semua anak, jadi atur ulang
+
+    def run(self):
+        self.show()
         self.Gtk.main()
 
 
@@ -623,7 +588,7 @@ def main(argv):
         app = App(source)
         app._pdf_target = Path(out).expanduser().resolve()
         app.refresh(dark=False)
-        app.win.show_all()
+        app.show()
         app.GLib.timeout_add_seconds(60, app.Gtk.main_quit)  # jaring pengaman
         app.Gtk.main()
         return 0

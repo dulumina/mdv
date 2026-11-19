@@ -7,30 +7,62 @@ Dibuat untuk Omarchy/Hyprland, tapi jalan di desktop Linux apa pun yang punya GT
 
 ## Fitur
 
-- **Tiga mode tampilan**: editor saja (`Ctrl+1`), pratinjau saja (`Ctrl+2`),
-  atau keduanya berdampingan (`Ctrl+3`).
-- **Editor dengan syntax highlighting Markdown** lewat GtkSourceView
-  (fallback ke `Gtk.TextView` polos kalau `gtksourceview4` tidak terpasang).
-- **Toolbar formater**: B, I, coret, `##`, daftar, task list, kutipan, blok kode, tautan.
-  Berlaku pada seleksi atau menyisipkan placeholder yang langsung tersorot;
-  `Ctrl+B` / `Ctrl+I` juga aktif.
+- **Tiga mode tampilan**: pratinjau saja (`Ctrl+1`, **default**), editor (`Ctrl+2`),
+  atau editor + pratinjau berdampingan (`Ctrl+3`).
+- **Editor WYSIWYG CKEditor 5** yang membaca dan menulis **Markdown GFM** langsung
+  (plugin `Markdown` di dalam build CKEditor), jadi file `.md` tetap format aslinya —
+  tidak ada konversi HTML di tengah jalan. Toolbar format, undo/redo, tabel, task list,
+  dan source editing datang dari CKEditor.
 - **Menu File**: Baru (`Ctrl+N`), Buka… (`Ctrl+O`), Simpan (`Ctrl+S`),
   Simpan Sebagai… (`Ctrl+Shift+S`), Ekspor ▸ HTML/PDF, Keluar (`Ctrl+Q`).
 - **Menu Tampilan**: centang "Mode gelap" + pilihan mode tampilan + muat ulang (`Ctrl+R`).
-  Tema berlaku untuk **seluruh window** — menu bar, toolbar, editor, dan dialog ikut
-  berganti, bukan cuma pratinjau.
+  Tema berlaku untuk **seluruh window** — menu bar, editor, dan dialog ikut berganti.
 - **Ekspor**: HTML satu file (CSS di-inline) dan PDF (selalu versi terang agar terbaca).
 - **Anti kehilangan data**: peringatan Simpan/Buang/Batal saat menutup window atau
   membuka dokumen lain dengan perubahan belum tersimpan; judul diberi `*` saat kotor.
 - `Esc` menutup window; link eksternal dibuka lewat `xdg-open`.
 
-## Alur render
+## Arsitektur singkat
 
-1. `markdown-it-py` preset `commonmark` + ekstensi `table` dan `strikethrough`
-2. blok kode diwarnai `pygments` (style `github-dark` / `default`, warna inline)
-3. `- [x]` diubah jadi checkbox asli
-4. dibungkus CSS resmi [`github-markdown-css`](https://github.com/sindresorhus/github-markdown-css);
-   varian gelap/terang awal diambil dari `gsettings get org.gnome.desktop.interface color-scheme`
+Buffer Markdown di Python adalah sumber kebenaran:
+
+- CKEditor (di WebView, JS aktif) ⇄ `window.webkit.messageHandlers.mdv` ⇄ buffer Python.
+- Pratinjau (WebView, JS mati) merender ulang buffer ↔ CSS GitHub.
+- Seluruh teks dokumen tidak pernah dibaca dari CKEditor saat menyimpan: simpan selalu
+  memakai buffer, jadi format Markdown tidak bisa "hilang" karena perilaku editor.
+
+## Build
+
+**Aplikasinya sendiri tidak punya langkah build.** `mdv` adalah satu skrip Python
+(+ CSS + aset CKEditor). Yang "dibangun" hanya CKEditor-nya, dan itu pun **tidak wajib**:
+`assets/ckeditor/ckeditor5.umd.js` + `ckeditor5.css` yang ada di repo ini adalah
+**build UMD siap pakai** dari paket npm resmi, tanpa bundler, tanpa webpack/vite.
+
+Pasang / perbarui aset CKEditor:
+
+```sh
+cd assets/ckeditor
+npm install ckeditor5@latest            # hanya untuk mengambil dist-nya
+cp node_modules/ckeditor5/dist/ckeditor5.umd.js .
+cp node_modules/ckeditor5/dist/ckeditor5.css .
+rm -rf node_modules package-lock.json package.json
+```
+
+Build UMD itu mengekspos global `CKEDITOR`, dan `assets/ckeditor/editor.js` memakai
+`CKEDITOR.ClassicEditor` beserta plugin `Markdown` (GFM) — jadi tidak ada tahap kompilasi.
+
+Kalau butuh **set plugin khusus** (plugin premium/ tambahan), buat build sendiri lalu
+letakkan hasilnya dengan nama yang sama:
+
+```sh
+npm create ckeditor5@latest        # atau: npm i ckeditor5 vite && ikuti dokumentasi
+# hasil build harus mengekspor global CKEDITOR (UMD) atau ubah editor.html/editor.js
+# agar memuat ESM, lalu salin ke assets/ckeditor/
+```
+
+Setelah aset berubah, jalankan `./install.sh` supaya `~/.local/share/mdv/assets/ckeditor/`
+ikut terbarui. Saat `mdv` dijalankan langsung dari checkout repo, aplikasi memakai
+`assets/` milik repo (lihat `assets_dir()`), jadi tidak perlu install ulang untuk mencoba.
 
 ## Pasang
 
@@ -45,15 +77,13 @@ cd mdv
 | Tujuan | Isi |
 |---|---|
 | `~/.local/bin/mdv` | executable |
-| `~/.local/share/mdv/assets/*.css` | CSS GitHub |
+| `~/.local/share/mdv/assets/` | CSS GitHub + `ckeditor/` |
 | `~/.local/share/applications/mdv.desktop` | entri menu "Open With" (Exec absolut) |
 
 Dependensi (Arch):
 
 ```sh
 sudo pacman -S --needed python-markdown-it-py python-pygments python-gobject gtk3 webkit2gtk-4.1
-# opsional, untuk syntax highlighting editor:
-sudo pacman -S --needed gtksourceview4
 ```
 
 ## Pakai
@@ -72,28 +102,27 @@ mdv --export pdf out.pdf README.md
 ## Tes
 
 ```sh
-python3 test_mdv.py
+python3 test_mdv.py        # render, ekspor HTML, menu, dirty flag, simpan, mode, tema
+python3 test_ckeditor.py   # integrasi CKEditor: data dua arah + tema (butuh sesi grafis)
 ```
-
-Menguji: render dark/light, ekspor HTML inline, menu, dirty flag, simpan, formater
-(bungkus seleksi + prefix baris), tiga mode tampilan, dan pergantian tema GTK.
 
 ## Batas yang diketahui
 
+- CKEditor menormalkan Markdown saat bolak-balik (mis. penanda daftar jadi `-`, spasi
+  antar-blok). Teks tetap utuh, tapi file bisa "dirapikan" saat disimpan.
+- Tanpa `assets/ckeditor/`, panel editor hanya menampilkan pesan; pratinjau tetap jalan.
 - Tema gelap/terang mengganti `gtk-theme-name` ke varian `-dark`/tanpa `-dark`
-  (mis. `Adwaita-dark` ⇄ `Adwaita`). Kalau tema sistem tidak punya pasangan varian,
-  hanya `gtk-application-prefer-dark-theme` + CSS internal yang berlaku.
+  (mis. `Adwaita-dark` ⇄ `Adwaita`).
 - HTML mentah di file **tidak** disanitasi. Aman untuk dokumen sendiri, jangan dipakai
   membuka `.md` dari sumber tak dikenal.
-- Tidak ada live-reload dari perubahan file di disk (yang live hanya dari editor),
-  emoji shortcode (`:rocket:`), anchor-link ikon pada heading, atau render matematika.
+- Tidak ada live-reload dari perubahan file di disk, emoji shortcode, anchor-link ikon
+  pada heading, atau render matematika.
 - Ekspor hanya HTML dan PDF. DOCX/ODT butuh `pandoc`.
-- CSS dan entri desktop menunjuk ke `$HOME` tetap (tidak membaca `XDG_DATA_HOME`).
-- Gambar relatif di HTML hasil ekspor tetap menunjuk path relatif.
 
 ## Lisensi
 
 Kode: milik penulis repo ini, tanpa lisensi eksplisit.
 
-`assets/*.css` berasal dari [sindresorhus/github-markdown-css](https://github.com/sindresorhus/github-markdown-css),
-MIT — teks lisensi ada di `assets/license-github-markdown-css.txt`.
+`assets/*.css` dari [sindresorhus/github-markdown-css](https://github.com/sindresorhus/github-markdown-css), MIT.
+`assets/ckeditor/` dari [CKEditor 5](https://ckeditor.com/ckeditor-5/) (GPL-2.0-or-later
+atau komersial; `licenseKey: 'GPL'` sudah diset di `editor.js`).
