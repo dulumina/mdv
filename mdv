@@ -1,0 +1,141 @@
+#!/usr/bin/env python3
+"""mdv — tampilkan file Markdown di window GTK (WebKitGTK) dengan tampilan GitHub.
+
+Pakai: mdv FILE.md        buka window
+       mdv -            baca stdin
+       mdv --dump FILE.md  cetak HTML ke stdout (tanpa GUI)
+"""
+import re
+import subprocess
+import sys
+from pathlib import Path
+
+from markdown_it import MarkdownIt
+from pygments import highlight as pygments_highlight
+from pygments.formatters import HtmlFormatter
+from pygments.lexers import get_lexer_by_name
+from pygments.util import ClassNotFound
+
+ASSETS = Path.home() / ".local/share/mdv/assets"
+
+PAGE = """<!doctype html>
+<html><head><meta charset="utf-8">
+<link rel="stylesheet" href="file://{css}">
+<style>
+  html, body {{ margin: 0; }}
+  .markdown-body {{ box-sizing: border-box; min-height: 100vh; max-width: 980px; margin: 0 auto; padding: 32px 45px 64px; }}
+</style></head>
+<body><article class="markdown-body">{body}</article></body></html>
+"""
+
+TASK_ITEM = re.compile(r'<li>\[([ xX])\] ')
+
+
+def is_dark():
+    try:
+        out = subprocess.run(
+            ["gsettings", "get", "org.gnome.desktop.interface", "color-scheme"],
+            capture_output=True, text=True, timeout=2,
+        ).stdout
+        return "dark" in out
+    except Exception:
+        return True
+
+
+def highlighter(style):
+    formatter = HtmlFormatter(nowrap=True, noclasses=True, style=style)
+
+    def hl(code, lang, attrs):
+        if not lang:
+            return ""
+        try:
+            lexer = get_lexer_by_name(lang)
+        except ClassNotFound:
+            return ""
+        return pygments_highlight(code, lexer, formatter)
+
+    return hl
+
+
+def render(text, dark):
+    md = MarkdownIt(
+        "commonmark", {"html": True, "highlight": highlighter("github-dark" if dark else "default")}
+    ).enable(["table", "strikethrough"])
+    html = md.render(text)
+    # checkbox task list ala GitHub
+    html = TASK_ITEM.sub(
+        lambda m: '<li class="task-list-item"><input type="checkbox" class="task-list-item-checkbox" disabled%s> '
+        % (" checked" if m.group(1) != " " else ""),
+        html,
+    )
+    name = "github-markdown-dark.css" if dark else "github-markdown-light.css"
+    return PAGE.format(css=ASSETS / name, body=html)
+
+
+def main():
+    args = [a for a in sys.argv[1:] if a != "--dump"]
+    dump = "--dump" in sys.argv
+    if len(args) != 1 or args[0] in ("-h", "--help"):
+        print(__doc__.strip())
+        return 0 if args[0:1] in (["-h"], ["--help"]) else 2
+
+    target = args[0]
+    if target == "-":
+        text, base, title = sys.stdin.read(), Path.cwd(), "stdin"
+    else:
+        path = Path(target).expanduser().resolve()
+        if not path.is_file():
+            print(f"mdv: tidak ada file: {path}", file=sys.stderr)
+            return 1
+        text, base, title = path.read_text(encoding="utf-8", errors="replace"), path.parent, path.name
+
+    html = render(text, is_dark())
+    if dump:
+        sys.stdout.write(html)
+        return 0
+
+    import gi
+    gi.require_version("Gtk", "3.0")
+    gi.require_version("Gdk", "3.0")
+    gi.require_version("WebKit2", "4.1")
+    from gi.repository import Gtk, Gdk, WebKit2
+
+    win = Gtk.Window(title=f"{title} — mdv")
+    win.set_default_size(980, 900)
+    win.set_icon_name("text-x-generic")
+
+    view = WebKit2.WebView()
+    view.get_settings().set_enable_javascript(False)
+
+    def on_navigate(_view, decision, dtype):
+        if dtype != WebKit2.PolicyDecisionType.NAVIGATION_ACTION:
+            return False
+        action = decision.get_navigation_action()
+        if action.get_navigation_type() == WebKit2.NavigationType.LINK_CLICKED:
+            uri = action.get_request().get_uri()
+            decision.ignore()
+            if uri and not uri.startswith("file://"):
+                subprocess.Popen(["xdg-open", uri], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            return True
+        return False
+
+    view.connect("decide-policy", on_navigate)
+    win.connect("key-press-event", lambda w, e: w.close() if e.keyval == Gdk.KEY_Escape else None)
+
+    def on_destroy(*_):
+        if Gtk.main_level() > 0:  # dari Ctrl+C loop-nya sudah bubar
+            Gtk.main_quit()
+
+    win.connect("destroy", on_destroy)
+    win.add(view)
+    win.show_all()
+    view.load_html(html, f"file://{base}/")
+    try:
+        Gtk.main()
+    except KeyboardInterrupt:
+        win.destroy()  # tanpa ini WebKit menggantung saat interpreter shutdown
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
