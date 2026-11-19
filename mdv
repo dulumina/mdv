@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-"""mdv — tampilkan file Markdown di window GTK (WebKitGTK) dengan tampilan GitHub.
+"""mdv — Markdown viewer + editor bergaya GitHub di window GTK (tanpa browser).
 
-Pakai: mdv FILE.md        buka window
-       mdv -            baca stdin
-       mdv --dump FILE.md  cetak HTML ke stdout (tanpa GUI)
+Pakai: mdv [FILE.md]                    buka window (kosong kalau tanpa argumen)
+       mdv -                           baca stdin
+       mdv --dump [FILE.md]            cetak HTML ke stdout
+       mdv --export html|pdf OUT FILE.md   ekspor tanpa membuka editor
 """
 import re
 import subprocess
@@ -17,10 +18,11 @@ from pygments.lexers import get_lexer_by_name
 from pygments.util import ClassNotFound
 
 ASSETS = Path.home() / ".local/share/mdv/assets"
+MD_GLOB = ("*.md", "*.markdown", "*.mdown", "*.mkd")
 
 PAGE = """<!doctype html>
 <html><head><meta charset="utf-8">
-<link rel="stylesheet" href="file://{css}">
+{css}
 <style>
   html, body {{ margin: 0; }}
   .markdown-body {{ box-sizing: border-box; min-height: 100vh; max-width: 980px; margin: 0 auto; padding: 32px 45px 64px; }}
@@ -57,57 +59,325 @@ def highlighter(style):
     return hl
 
 
-def render(text, dark):
+def render_body(text, dark):
     md = MarkdownIt(
         "commonmark", {"html": True, "highlight": highlighter("github-dark" if dark else "default")}
     ).enable(["table", "strikethrough"])
     html = md.render(text)
     # checkbox task list ala GitHub
-    html = TASK_ITEM.sub(
+    return TASK_ITEM.sub(
         lambda m: '<li class="task-list-item"><input type="checkbox" class="task-list-item-checkbox" disabled%s> '
         % (" checked" if m.group(1) != " " else ""),
         html,
     )
+
+
+def page(text, dark, inline_css=False):
     name = "github-markdown-dark.css" if dark else "github-markdown-light.css"
-    return PAGE.format(css=ASSETS / name, body=html)
-
-
-def main():
-    args = [a for a in sys.argv[1:] if a != "--dump"]
-    dump = "--dump" in sys.argv
-    if len(args) != 1 or args[0] in ("-h", "--help"):
-        print(__doc__.strip())
-        return 0 if args[0:1] in (["-h"], ["--help"]) else 2
-
-    target = args[0]
-    if target == "-":
-        text, base, title = sys.stdin.read(), Path.cwd(), "stdin"
+    css = ASSETS / name
+    if inline_css:  # ekspor HTML: satu file mandiri
+        link = "<style>\n%s\n</style>" % css.read_text(encoding="utf-8")
     else:
-        path = Path(target).expanduser().resolve()
-        if not path.is_file():
-            print(f"mdv: tidak ada file: {path}", file=sys.stderr)
-            return 1
-        text, base, title = path.read_text(encoding="utf-8", errors="replace"), path.parent, path.name
+        link = '<link rel="stylesheet" href="file://%s">' % css
+    return PAGE.format(css=link, body=render_body(text, dark))
 
-    html = render(text, is_dark())
-    if dump:
-        sys.stdout.write(html)
-        return 0
 
-    import gi
-    gi.require_version("Gtk", "3.0")
-    gi.require_version("Gdk", "3.0")
-    gi.require_version("WebKit2", "4.1")
-    from gi.repository import Gtk, Gdk, WebKit2
+def read_source(target):
+    if target == "-":
+        return sys.stdin.read(), Path.cwd(), None
+    path = Path(target).expanduser().resolve()
+    if not path.is_file():
+        raise FileNotFoundError(str(path))
+    return path.read_text(encoding="utf-8", errors="replace"), path.parent, path
 
-    win = Gtk.Window(title=f"{title} — mdv")
-    win.set_default_size(980, 900)
-    win.set_icon_name("text-x-generic")
 
-    view = WebKit2.WebView()
-    view.get_settings().set_enable_javascript(False)
+def export_html(source_path, out_path, dark):
+    text, _, _ = read_source(source_path)
+    Path(out_path).write_text(page(text, dark, inline_css=True), encoding="utf-8")
 
-    def on_navigate(_view, decision, dtype):
+
+class App:
+    def __init__(self, source=None):
+        import gi
+        gi.require_version("Gtk", "3.0")
+        gi.require_version("Gdk", "3.0")
+        gi.require_version("WebKit2", "4.1")
+        from gi.repository import Gdk, GLib, Gtk, WebKit2
+
+        self.Gdk, self.GLib, self.Gtk, self.WebKit2 = Gdk, GLib, Gtk, WebKit2
+        self.dark = is_dark()
+        self.path = None
+        self.dirty = False
+        self._pending = None      # id timeout render tertunda
+        self._loading = False     # sedang set buffer, jangan tandai dirty
+        self._pdf_target = None   # cetak ke PDF setelah halaman selesai dimuat
+
+        self.win = Gtk.Window()
+        self.win.set_default_size(1280, 900)
+        self.win.set_icon_name("text-x-generic")
+
+        self.buffer = Gtk.TextBuffer()
+        self.buffer.connect("changed", self.on_changed)
+        self.editor = Gtk.TextView(buffer=self.buffer)
+        self.editor.set_monospace(True)
+        self.editor.set_wrap_mode(Gtk.WrapMode.WORD_CHAR)
+        self.editor.set_left_margin(8)
+        self.editor.set_right_margin(8)
+
+        self.view = WebKit2.WebView()
+        self.view.get_settings().set_enable_javascript(False)
+        self.view.connect("load-changed", self.on_load)
+        self.view.connect("decide-policy", self.on_navigate)
+
+        scroller = Gtk.ScrolledWindow()
+        scroller.set_policy(Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.AUTOMATIC)
+        scroller.add(self.editor)
+
+        paned = Gtk.Paned(orientation=Gtk.Orientation.HORIZONTAL)
+        paned.set_position(500)
+        paned.pack1(scroller, True, False)
+        paned.pack2(self.view, True, False)
+
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        box.pack_start(self.build_menu(), False, False, 0)
+        box.pack_start(paned, True, True, 0)
+        self.win.add(box)
+
+        self.win.connect("delete-event", self.on_delete)
+        self.win.connect("destroy", self.on_destroy)
+        self.win.connect("key-press-event", self.on_key)
+
+        if source:
+            text, _, path = read_source(source)
+            self.load(text, path)
+        else:
+            self.set_title()
+
+    # ---------- menu ----------
+    def build_menu(self):
+        Gtk, Gdk = self.Gtk, self.Gdk
+        bar = Gtk.MenuBar()
+        accel = Gtk.AccelGroup()
+        self.win.add_accel_group(accel)
+
+        def item(menu, label, handler, key=None, mods=None):
+            it = Gtk.MenuItem(label=label)
+            it.connect("activate", handler)
+            if key:
+                it.add_accelerator(
+                    "activate", accel, key, mods or Gdk.ModifierType.CONTROL_MASK, Gtk.AccelFlags.VISIBLE
+                )
+            menu.append(it)
+            return it
+
+        file_menu = Gtk.Menu()
+        file_item = Gtk.MenuItem(label="File")
+        file_item.set_submenu(file_menu)
+        bar.append(file_item)
+
+        item(file_menu, "Baru", self.on_new, Gdk.KEY_n)
+        item(file_menu, "Buka…", self.on_open, Gdk.KEY_o)
+        item(file_menu, "Simpan", self.on_save, Gdk.KEY_s)
+        item(file_menu, "Simpan Sebagai…", self.on_save_as, Gdk.KEY_s,
+             Gdk.ModifierType.CONTROL_MASK | Gdk.ModifierType.SHIFT_MASK)
+        file_menu.append(Gtk.SeparatorMenuItem())
+
+        export_menu = Gtk.Menu()
+        export_item = Gtk.MenuItem(label="Ekspor")
+        export_item.set_submenu(export_menu)
+        item(export_menu, "HTML…", lambda *_: self.on_export("html"))
+        item(export_menu, "PDF…", lambda *_: self.on_export("pdf"))
+        file_menu.append(export_item)
+
+        file_menu.append(Gtk.SeparatorMenuItem())
+        item(file_menu, "Keluar", lambda *_: self.win.close(), Gdk.KEY_q)
+
+        view_menu = Gtk.Menu()
+        view_item = Gtk.MenuItem(label="Tampilan")
+        view_item.set_submenu(view_menu)
+        bar.append(view_item)
+
+        self.theme_item = Gtk.CheckMenuItem(label="Mode gelap")
+        self.theme_item.set_active(self.dark)
+        self.theme_item.connect("toggled", self.on_theme)
+        view_menu.append(self.theme_item)
+        item(view_menu, "Muat ulang pratinjau", lambda *_: self.refresh(), Gdk.KEY_r)
+
+        return bar
+
+    # ---------- dokumen ----------
+    def set_title(self):
+        name = self.path.name if self.path else "tanpa judul"
+        self.win.set_title(("%s%s — mdv" % ("*" if self.dirty else "", name)))
+
+    def load(self, text, path=None):
+        self._loading = True
+        self.buffer.set_text(text)
+        self._loading = False
+        self.path = path
+        self.dirty = False
+        self.set_title()
+        self.refresh()
+
+    def refresh(self, dark=None):
+        self._pending = None
+        if dark is None:
+            dark = self.dark
+        base = (self.path.parent if self.path else Path.cwd())
+        self.view.load_html(page(self.buffer.get_text(*self.buffer.get_bounds()), dark), "file://%s/" % base)
+        return False
+
+    def on_changed(self, _buffer):
+        if self._loading:
+            return
+        self.dirty = True
+        self.set_title()
+        if self._pending:
+            self.GLib.source_remove(self._pending)
+        self._pending = self.GLib.timeout_add(300, self.refresh)
+
+    # ---------- aksi file ----------
+    def confirm_discard(self):
+        if not self.dirty:
+            return True
+        Gtk = self.Gtk
+        dlg = Gtk.MessageDialog(
+            transient_for=self.win, modal=True, message_type=Gtk.MessageType.QUESTION,
+            buttons=Gtk.ButtonsType.NONE, text="Simpan perubahan?",
+        )
+        dlg.format_secondary_text(self.path.name if self.path else "Dokumen belum disimpan")
+        dlg.add_button("Batal", Gtk.ResponseType.CANCEL)
+        dlg.add_button("Buang", Gtk.ResponseType.NO)
+        dlg.add_button("Simpan", Gtk.ResponseType.YES)
+        resp = dlg.run()
+        dlg.destroy()
+        if resp == Gtk.ResponseType.YES:
+            return self.save()
+        return resp == Gtk.ResponseType.NO
+
+    def on_new(self, *_):
+        if not self.confirm_discard():
+            return
+        self.load("")
+
+    def on_open(self, *_):
+        if not self.confirm_discard():
+            return
+        Gtk = self.Gtk
+        dlg = Gtk.FileChooserDialog(title="Buka Markdown", transient_for=self.win, action=Gtk.FileChooserAction.OPEN)
+        dlg.add_buttons("Batal", Gtk.ResponseType.CANCEL, "Buka", Gtk.ResponseType.OK)
+        flt = Gtk.FileFilter()
+        flt.set_name("Markdown")
+        for pat in MD_GLOB:
+            flt.add_pattern(pat)
+        dlg.add_filter(flt)
+        if dlg.run() == Gtk.ResponseType.OK:
+            target = dlg.get_filename()
+            dlg.destroy()
+            try:
+                text, _, path = read_source(target)
+            except OSError as exc:
+                self.alert("Gagal membuka file: %s" % exc)
+                return
+            self.load(text, path)
+        else:
+            dlg.destroy()
+
+    def save(self):
+        if not self.path:
+            return self.save_as()
+        try:
+            self.path.write_text(self.buffer.get_text(*self.buffer.get_bounds()), encoding="utf-8")
+        except OSError as exc:
+            self.alert("Gagal menyimpan: %s" % exc)
+            return False
+        self.dirty = False
+        self.set_title()
+        return True
+
+    def save_as(self):
+        Gtk = self.Gtk
+        dlg = Gtk.FileChooserDialog(title="Simpan Markdown", transient_for=self.win, action=Gtk.FileChooserAction.SAVE)
+        dlg.add_buttons("Batal", Gtk.ResponseType.CANCEL, "Simpan", Gtk.ResponseType.OK)
+        dlg.set_do_overwrite_confirmation(True)
+        dlg.set_current_name(self.path.name if self.path else "tanpa-judul.md")
+        flt = Gtk.FileFilter()
+        flt.set_name("Markdown")
+        for pat in MD_GLOB:
+            flt.add_pattern(pat)
+        dlg.add_filter(flt)
+        if dlg.run() != Gtk.ResponseType.OK:
+            dlg.destroy()
+            return False
+        target = Path(dlg.get_filename())
+        dlg.destroy()
+        try:
+            target.write_text(self.buffer.get_text(*self.buffer.get_bounds()), encoding="utf-8")
+        except OSError as exc:
+            self.alert("Gagal menyimpan: %s" % exc)
+            return False
+        self.path = target
+        self.dirty = False
+        self.set_title()
+        self.refresh()
+        return True
+
+    def on_save(self, *_):
+        self.save()
+
+    def on_save_as(self, *_):
+        self.save_as()
+
+    # ---------- ekspor ----------
+    def on_export(self, fmt):
+        Gtk = self.Gtk
+        stem = self.path.stem if self.path else "tanpa-judul"
+        dlg = Gtk.FileChooserDialog(
+            title="Ekspor %s" % fmt.upper(), transient_for=self.win, action=Gtk.FileChooserAction.SAVE
+        )
+        dlg.add_buttons("Batal", Gtk.ResponseType.CANCEL, "Ekspor", Gtk.ResponseType.OK)
+        dlg.set_do_overwrite_confirmation(True)
+        dlg.set_current_name("%s.%s" % (stem, fmt))
+        if dlg.run() != Gtk.ResponseType.OK:
+            dlg.destroy()
+            return
+        target = Path(dlg.get_filename()).resolve()
+        dlg.destroy()
+        text = self.buffer.get_text(*self.buffer.get_bounds())
+        try:
+            if fmt == "html":
+                target.write_text(page(text, self.dark, inline_css=True), encoding="utf-8")
+            else:
+                self._pdf_target = target
+                self.refresh(dark=False)  # PDF selalu versi terang, lebih terbaca
+                return
+        except OSError as exc:
+            self.alert("Gagal mengekspor: %s" % exc)
+
+    def print_pdf(self, view, target):
+        Gtk = self.Gtk
+        op = self.WebKit2.PrintOperation.new(view)
+        settings = Gtk.PrintSettings()
+        settings.set(Gtk.PRINT_SETTINGS_OUTPUT_URI, target.as_uri())
+        settings.set(Gtk.PRINT_SETTINGS_OUTPUT_FILE_FORMAT, "pdf")
+        settings.set(Gtk.PRINT_SETTINGS_PAPER_FORMAT, "A4")
+        settings.set(Gtk.PRINT_SETTINGS_PRINTER, "Print to File")
+        op.set_print_settings(settings)
+        try:
+            op.print_()
+        except Exception as exc:  # noqa: BLE001 - GTK melempar GLib.Error
+            self.alert("Gagal membuat PDF: %s" % exc)
+
+    def on_load(self, view, event):
+        if event != self.WebKit2.LoadEvent.FINISHED:
+            return
+        if self._pdf_target:
+            target, self._pdf_target = self._pdf_target, None
+            self.print_pdf(view, target)
+            self.refresh()  # kembalikan tampilan sesuai tema aktif
+
+    def on_navigate(self, _view, decision, dtype):
+        WebKit2 = self.WebKit2
         if dtype != WebKit2.PolicyDecisionType.NAVIGATION_ACTION:
             return False
         action = decision.get_navigation_action()
@@ -119,23 +389,79 @@ def main():
             return True
         return False
 
-    view.connect("decide-policy", on_navigate)
-    win.connect("key-press-event", lambda w, e: w.close() if e.keyval == Gdk.KEY_Escape else None)
+    # ---------- misc ----------
+    def alert(self, message):
+        dlg = self.Gtk.MessageDialog(
+            transient_for=self.win, modal=True, message_type=self.Gtk.MessageType.ERROR,
+            buttons=self.Gtk.ButtonsType.CLOSE, text=message,
+        )
+        dlg.run()
+        dlg.destroy()
 
-    def on_destroy(*_):
-        if Gtk.main_level() > 0:  # dari Ctrl+C loop-nya sudah bubar
-            Gtk.main_quit()
+    def on_theme(self, item):
+        self.dark = item.get_active()
+        self.refresh()
 
-    win.connect("destroy", on_destroy)
-    win.add(view)
-    win.show_all()
-    view.load_html(html, f"file://{base}/")
-    try:
-        Gtk.main()
-    except KeyboardInterrupt:
-        win.destroy()  # tanpa ini WebKit menggantung saat interpreter shutdown
+    def on_key(self, _win, event):
+        if event.keyval == self.Gdk.KEY_Escape:
+            self.win.close()
+        return False
+
+    def on_delete(self, *_):
+        return not self.confirm_discard()  # True = batalkan penutupan
+
+    def on_destroy(self, *_):
+        if self.Gtk.main_level() > 0:  # dari Ctrl+C loop-nya sudah bubar
+            self.Gtk.main_quit()
+
+    def run(self):
+        self.win.show_all()
+        self.Gtk.main()
+
+
+def main(argv):
+    args = argv[1:]
+    dump = "--dump" in args
+    args = [a for a in args if a != "--dump"]
+    export = None
+    if args and args[0] == "--export":
+        if len(args) < 4:
+            print(__doc__.strip(), file=sys.stderr)
+            return 2
+        export, args = (args[1], args[2]), args[3:]
+
+    if args and args[0] in ("-h", "--help"):
+        print(__doc__.strip())
+        return 0
+    if len(args) > 1:
+        print(__doc__.strip(), file=sys.stderr)
+        return 2
+    source = args[0] if args else None
+
+    if dump:
+        text, _, path = read_source(source) if source else (sys.stdin.read(), Path.cwd(), None)
+        sys.stdout.write(page(text, is_dark()))
+        return 0
+
+    fmt, out = export if export else (None, None)
+    if fmt == "html":
+        export_html(source, out, is_dark())
+        return 0
+
+    if fmt == "pdf" and source:
+        # butuh WebView sungguhan untuk mencetak, jadi lewat window (sekilas muncul)
+        app = App(source)
+        app._pdf_target = Path(out).expanduser().resolve()
+        app.refresh(dark=False)
+        app.win.show_all()
+        app.GLib.timeout_add_seconds(60, app.Gtk.main_quit)  # jaring pengaman
+        app.Gtk.main()
+        return 0
+
+    app = App(source)
+    app.run()
     return 0
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    sys.exit(main(sys.argv))
