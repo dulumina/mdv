@@ -25,4 +25,4 @@ sed "s|@BIN@|$bin_dir/mdv|" "$here/mdv.desktop" > "$app_dir/mdv.desktop"
 update-desktop-database "$app_dir" 2>/dev/null || true
 
 echo "terpasang: $bin_dir/mdv"
-echo "hapus dengan: sh $here/uninstall.sh"
+[ -n "${MDV_NO_HINT:-}" ] || echo "hapus dengan: sh $here/uninstall.sh"

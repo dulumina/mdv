@@ -2,6 +2,7 @@
 # Pasang mdv tanpa clone repo:
 #   curl -fsSL https://raw.githubusercontent.com/dulumina/mdv/main/install-online.sh | sh
 # Pakai versi lain: MDV_REF=v1.0.1 curl ... | sh
+# Hapus: curl ... | sh -s -- uninstall
 set -eu
 
 repo="${MDV_REPO:-https://github.com/dulumina/mdv}"
@@ -20,4 +21,5 @@ esac
 
 echo "mengunduh $url"
 curl -fsSL "$url" | tar -xz -C "$tmp" --strip-components=1
-sh "$tmp/install.sh"
+MDV_NO_HINT=1 sh "$tmp/${1:-install}.sh"
+[ "${1:-install}" = uninstall ] || echo "hapus dengan: curl -fsSL $repo/raw/main/install-online.sh | sh -s -- uninstall"
