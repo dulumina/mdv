@@ -7,16 +7,22 @@ Dibuat untuk Omarchy/Hyprland, tapi jalan di desktop Linux apa pun yang punya GT
 
 ## Fitur
 
-- **Pratinjau + editor berdampingan** (split view), pratinjau ikut berubah saat mengetik
-  (debounce 300 ms).
+- **Tiga mode tampilan**: editor saja (`Ctrl+1`), pratinjau saja (`Ctrl+2`),
+  atau keduanya berdampingan (`Ctrl+3`).
+- **Editor dengan syntax highlighting Markdown** lewat GtkSourceView
+  (fallback ke `Gtk.TextView` polos kalau `gtksourceview4` tidak terpasang).
+- **Toolbar formater**: B, I, coret, `##`, daftar, task list, kutipan, blok kode, tautan.
+  Berlaku pada seleksi atau menyisipkan placeholder yang langsung tersorot;
+  `Ctrl+B` / `Ctrl+I` juga aktif.
 - **Menu File**: Baru (`Ctrl+N`), Buka… (`Ctrl+O`), Simpan (`Ctrl+S`),
   Simpan Sebagai… (`Ctrl+Shift+S`), Ekspor ▸ HTML/PDF, Keluar (`Ctrl+Q`).
-- **Menu Tampilan**: centang "Mode gelap" (langsung ganti CSS tanpa restart),
-  Muat ulang pratinjau (`Ctrl+R`).
+- **Menu Tampilan**: centang "Mode gelap" + pilihan mode tampilan + muat ulang (`Ctrl+R`).
+  Tema berlaku untuk **seluruh window** — menu bar, toolbar, editor, dan dialog ikut
+  berganti, bukan cuma pratinjau.
 - **Ekspor**: HTML satu file (CSS di-inline) dan PDF (selalu versi terang agar terbaca).
 - **Anti kehilangan data**: peringatan Simpan/Buang/Batal saat menutup window atau
-  membuka dokumen lain dengan perubahan belum tersimpan. Judul window diberi `*` saat kotor.
-- `Esc` menutup window; link eksternal dibuka lewat `xdg-open`, bukan di dalam window.
+  membuka dokumen lain dengan perubahan belum tersimpan; judul diberi `*` saat kotor.
+- `Esc` menutup window; link eksternal dibuka lewat `xdg-open`.
 
 ## Alur render
 
@@ -46,6 +52,8 @@ Dependensi (Arch):
 
 ```sh
 sudo pacman -S --needed python-markdown-it-py python-pygments python-gobject gtk3 webkit2gtk-4.1
+# opsional, untuk syntax highlighting editor:
+sudo pacman -S --needed gtksourceview4
 ```
 
 ## Pakai
@@ -64,19 +72,24 @@ mdv --export pdf out.pdf README.md
 ## Tes
 
 ```sh
-python3 test_mdv.py      # render, ekspor HTML, menu, dirty flag, simpan, toggle tema
+python3 test_mdv.py
 ```
+
+Menguji: render dark/light, ekspor HTML inline, menu, dirty flag, simpan, formater
+(bungkus seleksi + prefix baris), tiga mode tampilan, dan pergantian tema GTK.
 
 ## Batas yang diketahui
 
+- Tema gelap/terang mengganti `gtk-theme-name` ke varian `-dark`/tanpa `-dark`
+  (mis. `Adwaita-dark` ⇄ `Adwaita`). Kalau tema sistem tidak punya pasangan varian,
+  hanya `gtk-application-prefer-dark-theme` + CSS internal yang berlaku.
 - HTML mentah di file **tidak** disanitasi. Aman untuk dokumen sendiri, jangan dipakai
   membuka `.md` dari sumber tak dikenal.
 - Tidak ada live-reload dari perubahan file di disk (yang live hanya dari editor),
   emoji shortcode (`:rocket:`), anchor-link ikon pada heading, atau render matematika.
-- Ekspor hanya HTML dan PDF. DOCX/ODT butuh `pandoc` yang belum jadi dependensi.
+- Ekspor hanya HTML dan PDF. DOCX/ODT butuh `pandoc`.
 - CSS dan entri desktop menunjuk ke `$HOME` tetap (tidak membaca `XDG_DATA_HOME`).
-- Gambar relatif di HTML hasil ekspor tetap menunjuk path relatif; file HTML harus
-  disimpan di folder yang sama dengan gambarnya.
+- Gambar relatif di HTML hasil ekspor tetap menunjuk path relatif.
 
 ## Lisensi
 

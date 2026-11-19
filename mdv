@@ -111,41 +111,44 @@ class App:
         self._pending = None      # id timeout render tertunda
         self._loading = False     # sedang set buffer, jangan tandai dirty
         self._pdf_target = None   # cetak ke PDF setelah halaman selesai dimuat
+        self._syncing = False     # cegah rekursi saat menyetel state dari kode
+        self.mode = "both"        # both | editor | preview
 
         self.win = Gtk.Window()
         self.win.set_default_size(1280, 900)
         self.win.set_icon_name("text-x-generic")
 
-        self.buffer = Gtk.TextBuffer()
+        self._theme_name = Gtk.Settings.get_default().get_property("gtk-theme-name")
+        self._current_theme = self._theme_name
+        self.ui_css = Gtk.CssProvider()
+        Gtk.StyleContext.add_provider_for_screen(
+            Gdk.Screen.get_default(), self.ui_css, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION
+        )
+
+        self.scroller, self.editor, self.buffer = self.make_editor()
         self.buffer.connect("changed", self.on_changed)
-        self.editor = Gtk.TextView(buffer=self.buffer)
-        self.editor.set_monospace(True)
-        self.editor.set_wrap_mode(Gtk.WrapMode.WORD_CHAR)
-        self.editor.set_left_margin(8)
-        self.editor.set_right_margin(8)
 
         self.view = WebKit2.WebView()
         self.view.get_settings().set_enable_javascript(False)
         self.view.connect("load-changed", self.on_load)
         self.view.connect("decide-policy", self.on_navigate)
 
-        scroller = Gtk.ScrolledWindow()
-        scroller.set_policy(Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.AUTOMATIC)
-        scroller.add(self.editor)
+        self.paned = Gtk.Paned(orientation=Gtk.Orientation.HORIZONTAL)
+        self.paned.set_position(500)
+        self.paned.pack1(self.scroller, True, False)
+        self.paned.pack2(self.view, True, False)
 
-        paned = Gtk.Paned(orientation=Gtk.Orientation.HORIZONTAL)
-        paned.set_position(500)
-        paned.pack1(scroller, True, False)
-        paned.pack2(self.view, True, False)
-
-        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
-        box.pack_start(self.build_menu(), False, False, 0)
-        box.pack_start(paned, True, True, 0)
-        self.win.add(box)
+        self.box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        self.box.pack_start(self.build_menu(), False, False, 0)
+        self.toolbar = self.build_toolbar()
+        self.box.pack_start(self.toolbar, False, False, 0)
+        self.box.pack_start(self.paned, True, True, 0)
+        self.win.add(self.box)
 
         self.win.connect("delete-event", self.on_delete)
         self.win.connect("destroy", self.on_destroy)
         self.win.connect("key-press-event", self.on_key)
+        self.apply_ui_theme()
 
         if source:
             text, _, path = read_source(source)
@@ -157,15 +160,15 @@ class App:
     def build_menu(self):
         Gtk, Gdk = self.Gtk, self.Gdk
         bar = Gtk.MenuBar()
-        accel = Gtk.AccelGroup()
-        self.win.add_accel_group(accel)
+        self.accel = Gtk.AccelGroup()
+        self.win.add_accel_group(self.accel)
 
         def item(menu, label, handler, key=None, mods=None):
             it = Gtk.MenuItem(label=label)
             it.connect("activate", handler)
             if key:
                 it.add_accelerator(
-                    "activate", accel, key, mods or Gdk.ModifierType.CONTROL_MASK, Gtk.AccelFlags.VISIBLE
+                    "activate", self.accel, key, mods or Gdk.ModifierType.CONTROL_MASK, Gtk.AccelFlags.VISIBLE
                 )
             menu.append(it)
             return it
@@ -203,7 +206,173 @@ class App:
         view_menu.append(self.theme_item)
         item(view_menu, "Muat ulang pratinjau", lambda *_: self.refresh(), Gdk.KEY_r)
 
+        view_menu.append(Gtk.SeparatorMenuItem())
+        self.mode_items = {}
+        group = None
+        for label, key, mode in (
+            ("Editor saja", Gdk.KEY_1, "editor"),
+            ("Pratinjau saja", Gdk.KEY_2, "preview"),
+            ("Keduanya", Gdk.KEY_3, "both"),
+        ):
+            radio = Gtk.RadioMenuItem(label=label, group=group)
+            group = group or radio
+            radio.set_active(mode == self.mode)
+            radio.connect("toggled", lambda it, m=mode: it.get_active() and not self._syncing
+                          and self.set_view_mode(m))
+            radio.add_accelerator("activate", self.accel, key, Gdk.ModifierType.CONTROL_MASK, Gtk.AccelFlags.VISIBLE)
+            view_menu.append(radio)
+            self.mode_items[mode] = radio
+
         return bar
+
+    # ---------- editor ----------
+    def make_editor(self):
+        Gtk = self.Gtk
+        scroller = Gtk.ScrolledWindow()
+        scroller.set_policy(Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.AUTOMATIC)
+        self.GtkSource = None
+        try:
+            import gi
+            gi.require_version("GtkSource", "4")
+            from gi.repository import GtkSource
+
+            self.GtkSource = GtkSource
+            buffer = GtkSource.Buffer()
+            buffer.set_language(GtkSource.LanguageManager.get_default().get_language("markdown"))
+            buffer.set_highlight_syntax(True)
+            view = GtkSource.View(buffer=buffer)
+            view.set_highlight_current_line(True)
+        except (ImportError, ValueError):
+            buffer = Gtk.TextBuffer()
+            view = Gtk.TextView(buffer=buffer)
+            view.set_monospace(True)
+        view.set_wrap_mode(Gtk.WrapMode.WORD_CHAR)
+        view.set_left_margin(8)
+        view.set_right_margin(8)
+        scroller.add(view)
+        return scroller, view, buffer
+
+    def build_toolbar(self):
+        Gtk = self.Gtk
+        bar = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
+        bar.set_border_width(4)
+        accel = self.accel
+        specs = (
+            ("B", "Tebal — Ctrl+B", ("**", "**", "tebal"), None, "b"),
+            ("I", "Miring — Ctrl+I", ("*", "*", "miring"), None, "i"),
+            ("S", "Coret", ("~~", "~~", "coret"), None, None),
+            ("H2", "Judul", None, "## ", None),
+            ("•", "Daftar", None, "- ", None),
+            ("☑", "Task list", None, "- [ ] ", None),
+            (">", "Kutipan", None, "> ", None),
+            ("</>", "Blok kode", ("```\n", "\n```", "kode"), None, None),
+            ("🔗", "Tautan", ("[", "](url)", "teks"), None, None),
+        )
+        for label, tip, wrap, prefix, key in specs:
+            btn = Gtk.Button(label=label)
+            btn.set_tooltip_text(tip)
+            btn.connect("clicked", lambda *_, w=wrap, p=prefix: self.apply_format(w, p))
+            if key:
+                btn.add_accelerator(
+                    "clicked", accel, self.Gdk.KEY_b if key == "b" else self.Gdk.KEY_i,
+                    self.Gdk.ModifierType.CONTROL_MASK, Gtk.AccelFlags.VISIBLE,
+                )
+            bar.pack_start(btn, False, False, 0)
+        return bar
+
+    def apply_format(self, wrap=None, prefix=None):
+        buf = self.buffer
+        if buf.get_has_selection():
+            start, end = buf.get_selection_bounds()
+            s_off, e_off = start.get_offset(), end.get_offset()
+        else:
+            s_off = e_off = buf.get_iter_at_mark(buf.get_insert()).get_offset()
+
+        buf.begin_user_action()
+        if prefix is not None:
+            first = buf.get_iter_at_offset(s_off).get_line()
+            last = buf.get_iter_at_offset(e_off).get_line()
+            for line in range(last, first - 1, -1):  # mundur: offset baris lain tidak bergeser
+                buf.insert(buf.get_iter_at_line(line), prefix)
+            new_s = s_off + len(prefix)
+            new_e = e_off + len(prefix) * (last - first + 1)
+        else:
+            pre, suf, placeholder = wrap
+            if s_off == e_off:
+                buf.insert(buf.get_iter_at_offset(s_off), pre + placeholder + suf)
+                new_s = s_off + len(pre)
+                new_e = new_s + len(placeholder)
+            else:
+                text = buf.get_text(buf.get_iter_at_offset(s_off), buf.get_iter_at_offset(e_off), False)
+                buf.delete(buf.get_iter_at_offset(s_off), buf.get_iter_at_offset(e_off))
+                buf.insert(buf.get_iter_at_offset(s_off), pre + text + suf)
+                new_s = s_off + len(pre)
+                new_e = new_s + len(text)
+        buf.end_user_action()
+        buf.select_range(buf.get_iter_at_offset(new_s), buf.get_iter_at_offset(new_e))
+        self.editor.grab_focus()
+
+    # ---------- tema ----------
+    def theme_exists(self, name):
+        return any((base / name).is_dir() for base in (
+            Path("/usr/share/themes"), Path.home() / ".themes", Path.home() / ".local/share/themes"
+        ))
+
+    def apply_ui_theme(self):
+        """Samakan chrome GTK (menu, dialog, editor) dengan tema pratinjau."""
+        Gtk = self.Gtk
+        settings = Gtk.Settings.get_default()
+        settings.set_property("gtk-application-prefer-dark-theme", self.dark)
+        base = self._theme_name[:-5] if self._theme_name.endswith("-dark") else self._theme_name
+        wanted = base + ("-dark" if self.dark else "")
+        if wanted != self._current_theme and self.theme_exists(wanted):
+            settings.set_property("gtk-theme-name", wanted)
+            self._current_theme = wanted
+
+        if self.GtkSource is not None:
+            scheme = self.GtkSource.StyleSchemeManager.get_default().get_scheme(
+                "oblivion" if self.dark else "tango"
+            )
+            if scheme:
+                self.buffer.set_style_scheme(scheme)
+
+        bg, fg, muted = (
+            ("#0d1117", "#f0f6fc", "#30363d") if self.dark else ("#ffffff", "#1f2328", "#d1d9e0")
+        )
+        css = (
+            "window, .background { background-color: %s; color: %s; }"
+            "menubar, menubar > menuitem { background-color: %s; color: %s; }"
+            "menu, menu > menuitem { background-color: %s; color: %s; }"
+            "menu { border: 1px solid %s; }"
+            "menubar > menuitem:hover, menu > menuitem:hover { background-color: %s; color: %s; }"
+            "textview, textview text, .sourceview, .sourceview text { background-color: %s; color: %s; }"
+            "toolbar, .toolbar, button { background-color: %s; color: %s; }"
+            "paned > separator { background-color: %s; }"
+        ) % (bg, fg, bg, fg, bg, fg, muted, muted, fg, bg, fg, bg, fg, muted)
+        self.ui_css.load_from_data(css.encode("utf-8"))
+
+    def set_dark(self, dark, refresh=True):
+        self.dark = bool(dark)
+        self.apply_ui_theme()
+        if not self._syncing and self.theme_item.get_active() != self.dark:
+            self._syncing = True
+            self.theme_item.set_active(self.dark)
+            self._syncing = False
+        if refresh:
+            self.refresh()
+
+    def set_view_mode(self, mode):
+        self.mode = mode
+        show_editor = mode in ("both", "editor")
+        self.scroller.set_visible(show_editor)
+        self.toolbar.set_visible(show_editor)
+        self.view.set_visible(mode in ("both", "preview"))
+        self._syncing = True
+        for name, radio in self.mode_items.items():
+            radio.set_active(name == mode)
+        self._syncing = False
+        if mode == "preview":
+            self.refresh()
 
     # ---------- dokumen ----------
     def set_title(self):
@@ -399,8 +568,9 @@ class App:
         dlg.destroy()
 
     def on_theme(self, item):
-        self.dark = item.get_active()
-        self.refresh()
+        if self._syncing:
+            return
+        self.set_dark(item.get_active())
 
     def on_key(self, _win, event):
         if event.keyval == self.Gdk.KEY_Escape:
