@@ -21,6 +21,7 @@
 
   let editor = null;
   let pending = '';
+  let userTouched = false;   // interaksi manusia = perubahan boleh dikirim ke Python
   let lastSeen = null;
   let timer = null;
 
@@ -35,6 +36,7 @@
   window.mdv = {
     setMarkdown(md) {
       if (!editor) { pending = md; return; }
+      userTouched = false;          // pantulan setData bukan suntingan pengguna
       editor.setData(md);
       lastSeen = editor.getData();  // normalisasi CKEditor bukan perubahan pengguna
     },
@@ -43,6 +45,7 @@
     },
     // dipakai tes: mengubah data seperti pengguna mengetik
     simulateEdit(md) {
+      userTouched = true;
       editor.setData(md);
     },
     roundTrip(md) {
@@ -70,7 +73,11 @@
     })
     .then((e) => {
       editor = e;
+      // hanya interaksi manusia yang dikirim balik; setData programatik diabaikan
+      document.addEventListener('keydown', () => { userTouched = true; }, true);
+      document.addEventListener('mousedown', () => { userTouched = true; }, true);
       e.model.document.on('change:data', () => {
+        if (!userTouched) return;
         const md = e.getData();
         if (md === lastSeen) return;
         lastSeen = md;

@@ -133,10 +133,10 @@ class App:
             Gdk.Screen.get_default(), self.ui_css, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION
         )
 
-        self.buffer = Gtk.TextBuffer()
-        self.buffer.connect("changed", self.on_changed)
         self._editor_ready = False        # halaman CKEditor selesai dimuat
-        self.editor = self.make_editor()  # panel kiri: WebView + CKEditor
+        self.ckview = None                # WebView CKEditor (mode WYSIWYG)
+        self.editor = self.make_editor()  # panel kiri: Stack(editor teks, CKEditor)
+        self.buffer.connect("changed", self.on_changed)
 
         self.view = WebKit2.WebView()
         self.view.get_settings().set_enable_javascript(False)
@@ -150,6 +150,8 @@ class App:
 
         self.box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
         self.box.pack_start(self.build_menu(), False, False, 0)
+        self.toolbar = self.build_toolbar()
+        self.box.pack_start(self.toolbar, False, False, 0)
         self.box.pack_start(self.paned, True, True, 0)
         self.win.add(self.box)
 
@@ -217,11 +219,14 @@ class App:
         view_menu.append(Gtk.SeparatorMenuItem())
         self.mode_items = {}
         group = None
-        for label, key, mode in (
+        modes = [
             ("Pratinjau saja", Gdk.KEY_1, "preview"),
-            ("Editor", Gdk.KEY_2, "editor"),
+            ("Editor Markdown", Gdk.KEY_2, "editor"),
             ("Editor + pratinjau", Gdk.KEY_3, "both"),
-        ):
+        ]
+        if self.ckview is not None:
+            modes.append(("Editor WYSIWYG (CKEditor)", Gdk.KEY_4, "wysiwyg"))
+        for label, key, mode in modes:
             radio = Gtk.RadioMenuItem(label=label, group=group)
             group = group or radio
             radio.set_active(mode == self.mode)
@@ -233,8 +238,43 @@ class App:
 
         return bar
 
-    # ---------- editor (CKEditor 5, sumber isi tetap buffer Markdown) ----------
+    # ---------- editor: teks Markdown (GtkSource) + WYSIWYG (CKEditor) ----------
     def make_editor(self):
+        """Panel kiri: Stack berisi editor teks Markdown dan CKEditor.
+
+        Buffer teks adalah sumber isi; CKEditor hanya jendela lain ke buffer yang sama.
+        """
+        Gtk = self.Gtk
+        self.scroller = Gtk.ScrolledWindow()
+        self.scroller.set_policy(Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.AUTOMATIC)
+        try:
+            import gi
+            gi.require_version("GtkSource", "4")
+            from gi.repository import GtkSource
+
+            self.GtkSource = GtkSource
+            self.buffer = GtkSource.Buffer()
+            self.buffer.set_language(GtkSource.LanguageManager.get_default().get_language("markdown"))
+            self.buffer.set_highlight_syntax(True)
+            self.textview = GtkSource.View(buffer=self.buffer)
+            self.textview.set_highlight_current_line(True)
+        except (ImportError, ValueError):
+            self.GtkSource = None
+            self.buffer = Gtk.TextBuffer()
+            self.textview = Gtk.TextView(buffer=self.buffer)
+            self.textview.set_monospace(True)
+        self.textview.set_wrap_mode(Gtk.WrapMode.WORD_CHAR)
+        self.textview.set_left_margin(8)
+        self.textview.set_right_margin(8)
+        self.scroller.add(self.textview)
+
+        self.stack = Gtk.Stack()
+        self.stack.add_named(self.scroller, "teks")
+        self.stack.add_named(self.make_ckeditor(), "wysiwyg")
+        return self.stack
+
+    def make_ckeditor(self):
+        """WebView CKEditor; None kalau aset belum terpasang (mode WYSIWYG dimatikan)."""
         WebKit2 = self.WebKit2
         path = assets_dir() / "ckeditor" / "editor.html"
         if not path.is_file():
@@ -244,15 +284,75 @@ class App:
         manager = WebKit2.UserContentManager()
         manager.register_script_message_handler("mdv")
         manager.connect("script-message-received::mdv", self.on_editor_message)
-        view = WebKit2.WebView.new_with_user_content_manager(manager)
-        view.get_settings().set_enable_javascript(True)
-        view.connect("decide-policy", self.on_navigate)
-        view.load_uri(path.as_uri() + ("#dark" if self.dark else ""))
-        return view
+        self.ckview = WebKit2.WebView.new_with_user_content_manager(manager)
+        self.ckview.get_settings().set_enable_javascript(True)
+        self.ckview.connect("decide-policy", self.on_navigate)
+        self.ckview.load_uri(path.as_uri() + ("#dark" if self.dark else ""))
+        return self.ckview
+
+    def build_toolbar(self):
+        Gtk = self.Gtk
+        bar = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
+        bar.set_border_width(4)
+        accel = self.accel
+        specs = (
+            ("B", "Tebal — Ctrl+B", ("**", "**", "tebal"), None, "b"),
+            ("I", "Miring — Ctrl+I", ("*", "*", "miring"), None, "i"),
+            ("S", "Coret", ("~~", "~~", "coret"), None, None),
+            ("H2", "Judul", None, "## ", None),
+            ("•", "Daftar", None, "- ", None),
+            ("☑", "Task list", None, "- [ ] ", None),
+            (">", "Kutipan", None, "> ", None),
+            ("</>", "Blok kode", ("```\n", "\n```", "kode"), None, None),
+            ("🔗", "Tautan", ("[", "](url)", "teks"), None, None),
+        )
+        for label, tip, wrap, prefix, key in specs:
+            btn = Gtk.Button(label=label)
+            btn.set_tooltip_text(tip)
+            btn.connect("clicked", lambda *_, w=wrap, p=prefix: self.apply_format(w, p))
+            if key:
+                btn.add_accelerator(
+                    "clicked", accel, self.Gdk.KEY_b if key == "b" else self.Gdk.KEY_i,
+                    self.Gdk.ModifierType.CONTROL_MASK, Gtk.AccelFlags.VISIBLE,
+                )
+            bar.pack_start(btn, False, False, 0)
+        return bar
+
+    def apply_format(self, wrap=None, prefix=None):
+        buf = self.buffer
+        if buf.get_has_selection():
+            start, end = buf.get_selection_bounds()
+            s_off, e_off = start.get_offset(), end.get_offset()
+        else:
+            s_off = e_off = buf.get_iter_at_mark(buf.get_insert()).get_offset()
+
+        buf.begin_user_action()
+        if prefix is not None:
+            first = buf.get_iter_at_offset(s_off).get_line()
+            last = buf.get_iter_at_offset(e_off).get_line()
+            for line in range(last, first - 1, -1):  # mundur: offset baris lain tidak bergeser
+                buf.insert(buf.get_iter_at_line(line), prefix)
+            new_s = s_off + len(prefix)
+            new_e = e_off + len(prefix) * (last - first + 1)
+        else:
+            pre, suf, placeholder = wrap
+            if s_off == e_off:
+                buf.insert(buf.get_iter_at_offset(s_off), pre + placeholder + suf)
+                new_s = s_off + len(pre)
+                new_e = new_s + len(placeholder)
+            else:
+                text = buf.get_text(buf.get_iter_at_offset(s_off), buf.get_iter_at_offset(e_off), False)
+                buf.delete(buf.get_iter_at_offset(s_off), buf.get_iter_at_offset(e_off))
+                buf.insert(buf.get_iter_at_offset(s_off), pre + text + suf)
+                new_s = s_off + len(pre)
+                new_e = new_s + len(text)
+        buf.end_user_action()
+        buf.select_range(buf.get_iter_at_offset(new_s), buf.get_iter_at_offset(new_e))
+        self.textview.grab_focus()
 
     def js(self, script):
-        if self._editor_ready:
-            self.editor.run_javascript(script, None, None, None)
+        if self._editor_ready and self.ckview is not None:
+            self.ckview.run_javascript(script, None, None, None)
 
     def push_to_editor(self):
         if not self._editor_ready:
@@ -312,6 +412,13 @@ class App:
         ) % (bg, fg, bg, fg, bg, fg, muted, muted, fg, bg, fg, bg, fg, muted)
         self.ui_css.load_from_data(css.encode("utf-8"))
 
+        scheme = getattr(self, "GtkSource", None)
+        if scheme is not None:
+            name = "oblivion" if self.dark else "tango"
+            style = scheme.StyleSchemeManager.get_default().get_scheme(name)
+            if style:
+                self.buffer.set_style_scheme(style)
+
     def set_dark(self, dark, refresh=True):
         self.dark = bool(dark)
         self.apply_ui_theme()
@@ -325,8 +432,16 @@ class App:
 
     def set_view_mode(self, mode):
         self.mode = mode
-        self.editor.set_visible(mode in ("both", "editor"))
+        show_editor = mode in ("both", "editor", "wysiwyg")
+        self.editor.set_visible(show_editor)
+        self.toolbar.set_visible(mode in ("both", "editor"))
         self.view.set_visible(mode in ("both", "preview"))
+        if mode == "wysiwyg":
+            self.stack.set_visible_child_name("wysiwyg")
+            self.push_to_editor()
+        elif show_editor:
+            self.stack.set_visible_child_name("teks")
+            self.textview.grab_focus()
         self._syncing = True
         for name, radio in self.mode_items.items():
             radio.set_active(name == mode)

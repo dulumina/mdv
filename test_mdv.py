@@ -90,6 +90,18 @@ for mode, editor_shown, preview_shown in (("preview", False, True), ("editor", T
     app.set_view_mode(mode)
     assert app.editor.get_visible() is editor_shown, mode
     assert app.view.get_visible() is preview_shown, mode
+    assert app.toolbar.get_visible() is (mode != "preview"), mode
+
+# mode editor = teks Markdown asli, bukan hasil render
+app.set_view_mode("editor")
+assert app.stack.get_visible_child_name() == "teks", app.stack.get_visible_child_name()
+app.buffer.set_text("# mentah\n")
+assert app.textview.get_buffer().get_text(*app.textview.get_buffer().get_bounds()) == "# mentah\n"
+
+# toolbar menulis ke buffer lewat buffer yang sama dengan editor teks
+app.buffer.set_text("")
+app.apply_format(None, "## ")
+assert app.buffer.get_text(*app.buffer.get_bounds()) == "## "
 
 # tema berlaku ke chrome GTK, bukan cuma pratinjau
 settings = Gtk.Settings.get_default()

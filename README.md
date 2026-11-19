@@ -7,12 +7,15 @@ Dibuat untuk Omarchy/Hyprland, tapi jalan di desktop Linux apa pun yang punya GT
 
 ## Fitur
 
-- **Tiga mode tampilan**: pratinjau saja (`Ctrl+1`, **default**), editor (`Ctrl+2`),
-  atau editor + pratinjau berdampingan (`Ctrl+3`).
-- **Editor WYSIWYG CKEditor 5** yang membaca dan menulis **Markdown GFM** langsung
-  (plugin `Markdown` di dalam build CKEditor), jadi file `.md` tetap format aslinya —
-  tidak ada konversi HTML di tengah jalan. Toolbar format, undo/redo, tabel, task list,
-  dan source editing datang dari CKEditor.
+- **Empat mode tampilan**: pratinjau saja (`Ctrl+1`, **default**),
+  **editor Markdown** (`Ctrl+2`) — teks `.md` asli dengan pewarnaan sintaks —
+  editor + pratinjau (`Ctrl+3`), dan editor WYSIWYG (`Ctrl+4`), hanya muncul kalau
+  aset CKEditor terpasang.
+- **Editor teks** memakai GtkSourceView (bahasa Markdown) dengan toolbar formater:
+  tebal (`Ctrl+B`), miring (`Ctrl+I`), coret, judul, daftar, task list, kutipan,
+  blok kode, tautan.
+- **Editor WYSIWYG CKEditor 5** (opsional) membaca/menulis **Markdown GFM** langsung
+  lewat plugin `Markdown`, jadi file `.md` tetap Markdown, bukan HTML.
 - **Menu File**: Baru (`Ctrl+N`), Buka… (`Ctrl+O`), Simpan (`Ctrl+S`),
   Simpan Sebagai… (`Ctrl+Shift+S`), Ekspor ▸ HTML/PDF, Keluar (`Ctrl+Q`).
 - **Menu Tampilan**: centang "Mode gelap" + pilihan mode tampilan + muat ulang (`Ctrl+R`).
@@ -26,7 +29,10 @@ Dibuat untuk Omarchy/Hyprland, tapi jalan di desktop Linux apa pun yang punya GT
 
 Buffer Markdown di Python adalah sumber kebenaran:
 
-- CKEditor (di WebView, JS aktif) ⇄ `window.webkit.messageHandlers.mdv` ⇄ buffer Python.
+- Editor teks (GtkSourceView) mengedit buffer itu langsung.
+- CKEditor (di WebView, JS aktif) ⇄ `window.webkit.messageHandlers.mdv` ⇄ buffer Python;
+  hanya perubahan dari interaksi manusia yang dikirim balik, jadi `setData()` programatik
+  tidak menandai dokumen "kotor".
 - Pratinjau (WebView, JS mati) merender ulang buffer ↔ CSS GitHub.
 - Seluruh teks dokumen tidak pernah dibaca dari CKEditor saat menyimpan: simpan selalu
   memakai buffer, jadi format Markdown tidak bisa "hilang" karena perilaku editor.
